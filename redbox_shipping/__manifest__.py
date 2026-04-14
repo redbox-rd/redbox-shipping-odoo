@@ -5,8 +5,13 @@
     'description': """
     <h2>Redbox Shipping Integration</h2>
 
-    <p>RedBox offers innovative delivery service via lockers for high-speed & low-cost shopping experience
-Merchants enjoy same-day or next-day delivery within the same city and 2-3 days to other cities. Our self-deposit service empowers merchants to deposit their shipments directly into the locker. Connect seamlessly to our system via API integration. Customers can receive, return, and track shipments 24/7, ensuring flexibility that fits their schedule. With over 2000 RedBox Points across many cities in the Kingdom, we're here to make the delivery experience as smooth as possible.</p>
+    <p>RedBox offers innovative delivery service via lockers for a high-speed and low-cost shopping experience.</p>
+
+    <p>Merchants enjoy same-day or next-day delivery within the same city and 2–3 days to other cities.</p>
+
+    <p>Our self-deposit service empowers merchants to deposit shipments directly into lockers via API integration.</p>
+
+    <p>Customers can receive, return, and track shipments 24/7. With over 2000 RedBox Points, delivery becomes flexible and convenient.</p>
 
     <h3>Features</h3>
     <ul>
