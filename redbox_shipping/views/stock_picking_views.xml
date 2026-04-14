@@ -1,0 +1,28 @@
+<odoo>
+    <record id="view_picking_form_redbox" model="ir.ui.view">
+        <field name="name">stock.picking.form.redbox</field>
+        <field name="model">stock.picking</field>
+        <field name="inherit_id" ref="stock.view_picking_form"/>
+        <field name="arch" type="xml">
+
+            <xpath expr="//header" position="inside">
+
+                <button name="action_open_redbox_label"
+                        string="Download Shipping Label"
+                        type="object"
+                        class="btn-primary"
+                        invisible="not redbox_label_url"/>
+                
+            </xpath>
+
+            <xpath expr="//sheet" position="inside">
+                <group string="Redbox Shipping" invisible="not redbox_label_url">
+                    <field name="carrier_tracking_ref" readonly="1"/>
+                    <field name="redbox_shipment_status" invisible="not carrier_tracking_ref" readonly="1"/>
+                    <field name="redbox_label_url" widget="url" readonly="1" invisible="1"/>
+                </group>
+            </xpath>
+
+        </field>
+    </record>
+</odoo>
