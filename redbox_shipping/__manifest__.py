@@ -26,6 +26,8 @@
         <li>Configure API key</li>
         <li>Create Sale Order</li>
     </ol>
+    <h3>Preview</h3>
+    <img src="banner.png"/>
     """,
     'author': 'RedBox Technologies',
     'website': 'https://redboxsa.com',
