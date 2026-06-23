@@ -1,4 +1,5 @@
-from odoo import models, fields, api
+from odoo import models, fields, api, _
+from odoo.exceptions import UserError
 import logging
 import requests
 
@@ -25,6 +26,11 @@ class DeliveryCarrier(models.Model):
         default=False,
         help="Indicates if the Redbox webhook has been registered."
     )
+    redbox_fixed_price = fields.Float(
+        string="Redbox Fixed Price", 
+        default=12.0,
+        help="Enter a fixed price for Redbox shipping"
+    )
 
     def get_tracking_link(self, picking):
         """
@@ -42,14 +48,113 @@ class DeliveryCarrier(models.Model):
 
     def redbox_rate_shipment(self, order):
         """
-        Dummy rate shipment for Redbox (to be implemented).
+        Return the carrier's configured price without overriding it.
         """
         return {
             'success': True,
-            'price': 12,
+            'price': self.redbox_fixed_price,
             'error_message': False,
             'warning_message': False,
         }
+
+    def redbox_send_shipping(self, pickings):
+        """
+        Send shipment to Redbox API and create a shipping label.
+        Called by Odoo's delivery framework when 'Send to Shipper' is pressed.
+        """
+        result = []
+        for picking in pickings:
+            self = picking.carrier_id
+            self.ensure_one()
+
+            if not self.redbox_api_key:
+                raise ValueError(_("Redbox API key is not configured for carrier %s") % self.name)
+
+            # Build items from the picking's sale order (mirrors _create_redbox_shipment)
+            order = picking.sale_id
+            items = []
+            if order:
+                for line in order.order_line:
+                    if line.is_delivery:
+                        continue
+                    items.append({
+                        "name": line.product_id.name,
+                        "quantity": line.product_uom_qty,
+                        "unit_price": line.price_unit,
+                    })
+
+            # Use the shipping partner from the sale order
+            shipping_partner = order.partner_shipping_id if order else picking.partner_id
+
+            payload = {
+                "reference": order.name if order else picking.name,
+                "customer_name": shipping_partner.name,
+                "cod_amount": order.amount_total if order else 0.0,
+                "cod_currency": order.currency_id.name if order else "SAR",
+                "customer_phone": shipping_partner.phone or "",
+                "customer_address": shipping_partner.contact_address or "",
+                "customer_city": shipping_partner.state_id.name if shipping_partner.state_id else "",
+                "customer_country": shipping_partner.country_id.name if shipping_partner.country_id else "",
+                "items": items,
+            }
+
+            # Override COD amount to 0 if the order is already paid
+            if order:
+                tx = order.get_portal_last_transaction()
+                if tx and tx.state in ('done', 'authorized'):
+                    _logger.warning("💳 Order %s is PAID", order.name)
+                    payload['cod_amount'] = 0
+                else:
+                    _logger.warning("💵 Order %s is COD or unpaid", order.name)
+
+            _logger.info("=== REDBOX SEND SHIPPING ===")
+            _logger.info("Payload: %s", payload)
+
+            try:
+                response = requests.post(
+                    "https://api.redboxsa.com/v3/shipments",
+                    json=payload,
+                    headers={
+                        "Authorization": f"Bearer {self.redbox_api_key}"
+                    },
+                    timeout=50
+                )
+                _logger.info("Response Status: %s", response.status_code)
+                _logger.info("Response: %s", response.text)
+                response.raise_for_status()
+                data = response.json()
+            except Exception as e:
+                _logger.error("Redbox send shipping failed for picking %s: %s", picking.name, e)
+                raise UserError(_("Redbox shipping failed: %s") % str(e))
+
+            # Handle response (mirrors _create_redbox_shipment / _handle_redbox_response)
+            if data.get('success'):
+                _logger.info(
+                    "REDBOX shipment created successfully for order %s. Tracking: %s",
+                    order.name if order else picking.name,
+                    data.get('tracking_number')
+                )
+                picking.write({
+                    'carrier_tracking_ref': data.get('tracking_number'),
+                    'redbox_label_url': data.get('shipping_label_url'),
+                    'redbox_shipment_status': 'Pending',
+                })
+                result.append({
+                    'exact_price': picking.carrier_price,
+                    'tracking_number': data.get('tracking_number'),
+                })
+            else:
+                error_msg = data.get('msg', 'Unknown error')
+                picking.message_post(body=_('Redbox API Error: %s') % error_msg)
+                _logger.error("REDBOX API Error for order %s: %s",
+                              order.name if order else picking.name, error_msg)
+                # Return a result with failure info so Odoo doesn't break
+                result.append({
+                    'exact_price': picking.carrier_price,
+                    'tracking_number': False,
+                })
+
+        return result
 
     def _notify_redbox(self):
         """
