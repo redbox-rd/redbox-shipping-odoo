@@ -9,6 +9,7 @@
 
                 <group string="Redbox Configuration" invisible="delivery_type != 'redbox'">
                     <field name="redbox_api_key" password="True" required="delivery_type == 'redbox'"/>
+                    <field name="redbox_fixed_price"/>
                 </group>
 
             </xpath>
