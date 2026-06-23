@@ -1,5 +1,6 @@
 import logging
 import requests
+import traceback
 from odoo import models, _
 
 _logger = logging.getLogger(__name__)
@@ -11,6 +12,7 @@ class SaleOrder(models.Model):
         """
         Override to create Redbox shipment if delivery_type is 'redbox'.
         """
+        _logger.info("action_confirm called from:\n%s", "".join(traceback.format_stack()))
         _logger.info("action_confirm called: %s", self.ids)
         res = super().action_confirm()
         for order in self:
