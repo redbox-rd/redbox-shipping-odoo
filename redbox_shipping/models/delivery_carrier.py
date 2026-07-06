@@ -31,6 +31,13 @@ class DeliveryCarrier(models.Model):
         default=12.0,
         help="Enter a fixed price for Redbox shipping"
     )
+    blocked_payment_provider_ids = fields.Many2many(
+        'payment.provider', # use 'payment.acquirer' if using Odoo 14 or earlier
+        'delivery_carrier_payment_provider_rel', # Name of the intermediary table
+        'carrier_id', 'provider_id',
+        string="Blocked Payment Methods",
+        help="Select payment methods to BLOCK when the customer chooses Redbox shipping."
+    )
 
     def get_tracking_link(self, picking):
         """
