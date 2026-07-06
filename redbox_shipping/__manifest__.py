@@ -5,7 +5,7 @@
     'author': 'RedBox Technologies',
     'website': 'https://redboxsa.com',
     'category': 'Inventory/Delivery',
-    'depends': ['delivery', 'website_sale', 'stock'],
+    'depends': ['delivery', 'website_sale', 'payment', 'stock'],
     'data': [
         'views/delivery_views.xml',
         'views/stock_picking_views.xml',
