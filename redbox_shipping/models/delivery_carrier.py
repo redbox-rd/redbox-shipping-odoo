@@ -96,7 +96,7 @@ class DeliveryCarrier(models.Model):
             payload = {
                 "reference": order.name if order else picking.name,
                 "customer_name": shipping_partner.name,
-                "cod_amount": order.amount_total if order else 0.0,
+                "cod_amount": (order.amount_total - order.amount_paid) if order else 0.0,
                 "cod_currency": order.currency_id.name if order else "SAR",
                 "customer_phone": shipping_partner.phone or "",
                 "customer_address": shipping_partner.contact_address or "",
