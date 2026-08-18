@@ -40,7 +40,7 @@ class SaleOrder(models.Model):
         payload = {
             "reference": self.name,
             "customer_name": self.partner_shipping_id.name,
-            "cod_amount": self.amount_total,
+            "cod_amount": self.amount_total - self.amount_paid,
             "cod_currency": self.currency_id.name,
             "customer_phone": self.partner_shipping_id.phone,
             "customer_address": self.partner_shipping_id.contact_address,
@@ -48,13 +48,7 @@ class SaleOrder(models.Model):
             "customer_country": self.partner_shipping_id.country_id.name,
             "items": items,
         }
-        
-        tx = self.get_portal_last_transaction()
-        if tx and tx.state in ['done', 'authorized']:
-            _logger.warning("💳 Order %s is PAID", self.name)
-            payload['cod_amount'] = 0
-        else:
-            _logger.warning("💵 Order %s is COD or unpaid", self.name)
+
         _logger.info("REDBOX Payload for order %s: %s", self.name, payload)
         try:
             response = requests.post(
