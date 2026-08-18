@@ -2,6 +2,7 @@ from odoo import models, fields, api, _
 from odoo.exceptions import UserError
 import logging
 import requests
+import secrets
 
 _logger = logging.getLogger(__name__)
 
@@ -38,6 +39,11 @@ class DeliveryCarrier(models.Model):
         string="Blocked Payment Methods",
         help="Select payment methods to BLOCK when the customer chooses Redbox shipping."
     )
+    redbox_webhook_token = fields.Char(
+        string="Webhook Token", groups="base.group_system", copy=False,
+        default=lambda self: secrets.token_urlsafe(32)
+    )
+
 
     def get_tracking_link(self, picking):
         """
@@ -115,7 +121,6 @@ class DeliveryCarrier(models.Model):
                     _logger.warning("💵 Order %s is COD or unpaid", order.name)
 
             _logger.info("=== REDBOX SEND SHIPPING ===")
-            _logger.info("Payload: %s", payload)
 
             try:
                 response = requests.post(
@@ -179,11 +184,18 @@ class DeliveryCarrier(models.Model):
             webhook_url = f"{base_url}/redbox/webhook"
             payload = {
                 "event": "shipment.status.update",
-                "original_id": self.env.cr.dbname,
+                "original_id": f"odoo-{self.env.cr.dbname}",
                 "subscriber": self.env.cr.dbname,
                 "target_url": webhook_url,
+                "headers": {
+                    "redbox-webhook-token": self.redbox_webhook_token or ''
+                }
             }
-            _logger.info("Registering Redbox webhook: %s", payload)
+            _logger.info(
+                "Registering Redbox webhook for carrier %s: url=%s",
+                self.name,
+                webhook_url,
+            )
             res = requests.post(
                 "https://api.redboxsa.com/v3/webhooks",
                 json=payload,

@@ -90,11 +90,6 @@ class StockPicking(models.Model):
             headers = {
                 "Authorization": f"Bearer {self.carrier_id.redbox_api_key}"
             }
-            _logger.info("=== REDBOX REQUEST ===")
-            _logger.info("URL: %s", url)
-            _logger.info("Method: PUT")
-            _logger.info("Headers: %s", headers)
-            _logger.info("Payload: %s", payload)
             response = requests.put(
                 url,
                 json=payload,
@@ -140,11 +135,6 @@ class StockPicking(models.Model):
             headers = {
                 "Authorization": f"Bearer {self.carrier_id.redbox_api_key}"
             }
-            _logger.info("=== REDBOX REQUEST ===")
-            _logger.info("URL: %s", url)
-            _logger.info("Method: POST")
-            _logger.info("Headers: %s", headers)
-            _logger.info("Payload: %s", payload)
             response = requests.post(
                 url,
                 json=payload,
@@ -270,11 +260,6 @@ class StockPicking(models.Model):
             headers = {
                 "Authorization": f"Bearer {self.carrier_id.redbox_api_key}"
             }
-            _logger.info("=== REDBOX REQUEST ===")
-            _logger.info("URL: %s", url)
-            _logger.info("Method: PUT")
-            _logger.info("Headers: %s", headers)
-            _logger.info("Payload: %s", payload)
             response = requests.put(
                 url,
                 json=payload,
