@@ -257,16 +257,9 @@ class StockPicking(models.Model):
         
         payload = {
             "items": items,
-            "cod_amount": order.amount_total,
+            "cod_amount": (order.amount_total - order.amount_paid),
             "cod_currency": order.currency_id.name,
         }
-        
-        tx = order.get_portal_last_transaction()
-        if tx and tx.state in ['done', 'authorized']:
-            _logger.warning("💳 Order %s is PAID", order.name)
-            payload['cod_amount'] = 0
-        else:
-            _logger.warning("💵 Order %s is COD or unpaid", order.name)
             
         _logger.warning("📦 Redbox payload update: %s", payload)
 

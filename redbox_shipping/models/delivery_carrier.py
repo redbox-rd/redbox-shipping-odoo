@@ -96,7 +96,7 @@ class DeliveryCarrier(models.Model):
             payload = {
                 "reference": order.name if order else picking.name,
                 "customer_name": shipping_partner.name,
-                "cod_amount": order.amount_total if order else 0.0,
+                "cod_amount": (order.amount_total - order.amount_paid) if order else 0.0,
                 "cod_currency": order.currency_id.name if order else "SAR",
                 "customer_phone": shipping_partner.phone or "",
                 "customer_address": shipping_partner.contact_address or "",
@@ -104,15 +104,6 @@ class DeliveryCarrier(models.Model):
                 "customer_country": shipping_partner.country_id.name if shipping_partner.country_id else "",
                 "items": items,
             }
-
-            # Override COD amount to 0 if the order is already paid
-            if order:
-                tx = order.get_portal_last_transaction()
-                if tx and tx.state in ('done', 'authorized'):
-                    _logger.warning("💳 Order %s is PAID", order.name)
-                    payload['cod_amount'] = 0
-                else:
-                    _logger.warning("💵 Order %s is COD or unpaid", order.name)
 
             _logger.info("=== REDBOX SEND SHIPPING ===")
             _logger.info("Payload: %s", payload)
