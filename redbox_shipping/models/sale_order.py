@@ -49,7 +49,6 @@ class SaleOrder(models.Model):
             "items": items,
         }
 
-        _logger.info("REDBOX Payload for order %s: %s", self.name, payload)
         try:
             response = requests.post(
                 "https://api.redboxsa.com/v3/shipments",
