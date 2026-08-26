@@ -214,7 +214,7 @@ class DeliveryCarrier(models.Model):
         except Exception as e:
             _logger.error("Registering Redbox webhook failed: %s", e)
 
-    @api.model
+    @api.model_create_multi
     def create(self, vals_list):
         """
         Override create to notify Redbox if API key is set.
