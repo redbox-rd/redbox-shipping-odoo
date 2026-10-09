@@ -12,11 +12,8 @@ class SaleOrder(models.Model):
         """
         Override to create Redbox shipment if delivery_type is 'redbox'.
         """
-        _logger.info("action_confirm called from:\n%s", "".join(traceback.format_stack()))
-        _logger.info("action_confirm called: %s", self.ids)
         res = super().action_confirm()
         for order in self:
-            _logger.info("action_confirm delivery_type: %s", order.carrier_id.delivery_type)
             if order.carrier_id.delivery_type == 'redbox':
                 order._create_redbox_shipment()
         return res
@@ -48,7 +45,8 @@ class SaleOrder(models.Model):
             "customer_country": self.partner_shipping_id.country_id.name,
             "items": items,
         }
-
+        if self.carrier_id.redbox_home_delivery:
+            payload['delivery_method'] = 'home_delivery'
         try:
             response = requests.post(
                 "https://api.redboxsa.com/v3/shipments",
