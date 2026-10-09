@@ -1,7 +1,7 @@
 {
-    'name': 'Redbox Shipping',
+    'name': 'RedBox Shipping',
     'version': '1.0',
-    'summary': 'Shipping integration with Redbox',
+    'summary': 'Shipping integration with RedBox',
     'author': 'RedBox Technologies',
     'website': 'https://redboxsa.com',
     'category': 'Inventory/Delivery',
