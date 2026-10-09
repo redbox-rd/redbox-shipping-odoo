@@ -7,9 +7,10 @@
 
             <xpath expr="//group" position="inside">
 
-                <group string="Redbox Configuration" invisible="delivery_type != 'redbox'">
+                <group string="RedBox Configuration" invisible="delivery_type != 'redbox'">
                     <field name="redbox_api_key" password="True" required="delivery_type == 'redbox'"/>
                     <field name="redbox_fixed_price"/>
+                    <field name="redbox_home_delivery"/>
                     <field name="blocked_payment_provider_ids" 
                        widget="many2many_tags" 
                        invisible="delivery_type != 'redbox'"/>

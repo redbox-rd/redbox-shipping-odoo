@@ -16,7 +16,7 @@
             </xpath>
 
             <xpath expr="//sheet" position="inside">
-                <group string="Redbox Shipping" invisible="not redbox_label_url">
+                <group string="RedBox Shipping" invisible="not redbox_label_url">
                     <field name="carrier_tracking_ref" readonly="1"/>
                     <field name="redbox_shipment_status" invisible="not carrier_tracking_ref" readonly="1"/>
                     <field name="redbox_label_url" widget="url" readonly="1" invisible="1"/>

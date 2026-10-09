@@ -8,7 +8,7 @@ class StockPicking(models.Model):
     _inherit = 'stock.picking'
 
     redbox_label_url = fields.Char(string="Shipping Label URL")
-    redbox_shipment_status = fields.Char(string="Redbox Shipment Status")
+    redbox_shipment_status = fields.Char(string="RedBox Shipment Status")
 
     def action_open_redbox_label(self):
         """
