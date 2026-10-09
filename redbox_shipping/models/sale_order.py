@@ -45,7 +45,8 @@ class SaleOrder(models.Model):
             "customer_country": self.partner_shipping_id.country_id.name,
             "items": items,
         }
-
+        if self.carrier_id.redbox_home_delivery:
+            payload['delivery_method'] = 'home_delivery'
         try:
             response = requests.post(
                 "https://api.redboxsa.com/v3/shipments",

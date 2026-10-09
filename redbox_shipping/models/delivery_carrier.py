@@ -14,30 +14,35 @@ class DeliveryCarrier(models.Model):
     _inherit = 'delivery.carrier'
 
     delivery_type = fields.Selection(
-        selection_add=[('redbox', 'Redbox')],
+        selection_add=[('redbox', 'RedBox')],
         ondelete={'redbox': 'set default'},
     )
     redbox_api_key = fields.Char(
-        string="Redbox API Key",
+        string="RedBox API Key",
         groups="base.group_system",
-        help="API key for Redbox integration. Only visible to administrators."
+        help="API key for RedBox integration. Only visible to administrators."
     )
     redbox_webhook_created = fields.Boolean(
-        string="Redbox Connected",
+        string="RedBox Connected",
         default=False,
         help="Indicates if the Redbox webhook has been registered."
     )
     redbox_fixed_price = fields.Float(
-        string="Redbox Fixed Price", 
+        string="RedBox Fixed Price", 
         default=12.0,
         help="Enter a fixed price for Redbox shipping"
+    )
+    redbox_home_delivery = fields.Boolean(
+        string="RedBox Home Delivery",
+        default=False,
+        help="When enabled, create shipments as RedBox Home Delivery."
     )
     blocked_payment_provider_ids = fields.Many2many(
         'payment.provider', # use 'payment.acquirer' if using Odoo 14 or earlier
         'delivery_carrier_payment_provider_rel', # Name of the intermediary table
         'carrier_id', 'provider_id',
         string="Blocked Payment Methods",
-        help="Select payment methods to BLOCK when the customer chooses Redbox shipping."
+        help="Select payment methods to BLOCK when the customer chooses RedBox shipping."
     )
     redbox_webhook_token = fields.Char(
         string="Webhook Token", groups="base.group_system", copy=False,
@@ -110,7 +115,8 @@ class DeliveryCarrier(models.Model):
                 "customer_country": shipping_partner.country_id.name if shipping_partner.country_id else "",
                 "items": items,
             }
-
+            if self.redbox_home_delivery:
+                payload['delivery_method'] = 'home_delivery'
             # Override COD amount to 0 if the order is already paid
             if order:
                 tx = order.get_portal_last_transaction()
@@ -243,7 +249,7 @@ class DeliveryCarrier(models.Model):
         Onchange: Set name, country, and states for Redbox delivery type.
         """
         if self.delivery_type == 'redbox':
-            self.name = "Redbox"
+            self.name = "RedBox Home Delivery" if self.redbox_home_delivery else "RedBox"
             sa = self.env.ref('base.sa', raise_if_not_found=False)
             if sa:
                 self.country_ids = [(6, 0, [sa.id])]
@@ -251,3 +257,11 @@ class DeliveryCarrier(models.Model):
                     ('country_id', '=', sa.id)
                 ])
                 self.state_ids = [(6, 0, states.ids)]
+
+    @api.onchange('redbox_home_delivery')
+    def _onchange_redbox_home_delivery(self):
+        """
+        Onchange: Update the carrier name based on the Home Delivery toggle.
+        """
+        if self.delivery_type == 'redbox':
+            self.name = "RedBox Home Delivery" if self.redbox_home_delivery else "RedBox"
