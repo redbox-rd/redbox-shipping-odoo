@@ -1,283 +1,361 @@
-from odoo import models, fields, _
-import logging, json, requests
+import logging
+from urllib.parse import quote
+
+import requests
+from dateutil import parser as date_parser
+from dateutil import tz
+
+from odoo import _, api, fields, models
+from odoo.exceptions import UserError
+
+from .delivery_carrier import REDBOX_MAX_COD
 
 _logger = logging.getLogger(__name__)
+
+# RedBox status names (see API docs "Shipment statuses")
+REDBOX_STATUS_RETURNED = 'returned'
+REDBOX_ALERT_STATUSES = ('canceled', 'cancelled', 'not-delivered', 'not-deposited')
 
 
 class StockPicking(models.Model):
     _inherit = 'stock.picking'
 
-    redbox_label_url = fields.Char(string="Shipping Label URL")
-    redbox_shipment_status = fields.Char(string="RedBox Shipment Status")
+    redbox_delivery_type = fields.Selection(related='carrier_id.delivery_type', string="Carrier Type")
+    redbox_shipment_id = fields.Char(string="RedBox Shipment ID", copy=False, readonly=True)
+    redbox_reference = fields.Char(string="RedBox Reference", copy=False, readonly=True)
+    redbox_label_url = fields.Char(string="Shipping Label URL", copy=False)
+    redbox_shipment_status = fields.Char(string="RedBox Shipment Status", copy=False)
+    redbox_status_code = fields.Integer(string="RedBox Status Code", copy=False)
+    redbox_status_date = fields.Datetime(string="RedBox Status Date", copy=False)
+    redbox_return_code = fields.Char(
+        string="RedBox Return Code", copy=False, readonly=True,
+        help="Code the customer uses to drop the return parcel at a RedBox locker.")
+    redbox_cod_amount = fields.Float(string="RedBox COD Amount", copy=False, readonly=True)
+    redbox_send_count = fields.Integer(copy=False, readonly=True)
+    redbox_origin_picking_id = fields.Many2one(
+        'stock.picking', string="RedBox Original Delivery",
+        compute='_compute_redbox_origin_picking')
+    redbox_can_create_return = fields.Boolean(compute='_compute_redbox_origin_picking')
+
+    @api.depends('move_ids.origin_returned_move_id', 'picking_type_code', 'state', 'redbox_shipment_id')
+    def _compute_redbox_origin_picking(self):
+        for picking in self:
+            origin = picking.move_ids.origin_returned_move_id.picking_id.filtered(
+                lambda p: p.carrier_id.delivery_type == 'redbox')[:1]
+            picking.redbox_origin_picking_id = origin
+            picking.redbox_can_create_return = bool(
+                origin
+                and picking.picking_type_code == 'incoming'
+                and not picking.redbox_shipment_id
+                and picking.state not in ('done', 'cancel')
+            )
+
+    # -------------------------------------------------------------------------
+    # Actions
+    # -------------------------------------------------------------------------
 
     def action_open_redbox_label(self):
-        """
-        Open the shipping label URL in a new tab.
-        """
         self.ensure_one()
         return {
             'type': 'ir.actions.act_url',
             'url': self.redbox_label_url,
             'target': 'new',
         }
-    def write(self, vals):
-        _logger.warning("WRITE StockPicking: %s", vals.keys())
-        watch_fields = ['move_ids','move_ids_without_package']
 
-        old_data = {}
-        _logger.warning("WRITE StockPicking old_data: %s", old_data)
-        if any(f in vals for f in watch_fields):
-            for picking in self:
-                if picking.carrier_id.delivery_type == 'redbox':
-                    old_data[picking.id] = picking._get_redbox_items_json()
-        _logger.warning("WRITE StockPicking old_data: %s", old_data)
-        res = super().write(vals)
-
-        if not old_data:
-            return res
-
+    def action_redbox_create_return(self):
         for picking in self:
-            if picking.carrier_id.delivery_type != 'redbox':
-                continue
+            picking._redbox_create_return()
+        return True
 
-            new_data = picking._get_redbox_items_json()
-            old_items = old_data.get(picking.id)
+    # -------------------------------------------------------------------------
+    # Shipment payload
+    # -------------------------------------------------------------------------
 
-            if old_items != new_data:
-                _logger.warning("🚚 Redbox items changed for %s", picking.name)
-                picking._send_update_to_redbox(json.loads(new_data))
-            else:
-                _logger.warning("🚚 No change in items for %s", picking.name)
-
-        return res
-    def _get_redbox_items(self):
+    def _redbox_get_items(self, use_demand=False):
         self.ensure_one()
-
-        moves = getattr(self, 'move_ids_without_package', False) or self.move_ids
-
         items = []
-
-        for move in moves:
+        for move in self.move_ids:
             if move.state == 'cancel' or move.product_id.type == 'service':
                 continue
-
-            qty = getattr(move, 'quantity', move.product_uom_qty)
-
-            items.append({
-                "name": move.product_id.name,
-                "quantity": qty,
-                "unit_price": move.sale_line_id.price_unit if move.sale_line_id else 0,
-            })
-
+            qty = move.product_uom_qty if use_demand else (move.quantity or move.product_uom_qty)
+            if not qty:
+                continue
+            line = move.sale_line_id
+            if line:
+                currency = line.order_id.currency_id
+                unit_price = line.price_reduce_taxinc if 'price_reduce_taxinc' in line._fields else line.price_unit
+            else:
+                currency = self.company_id.currency_id
+                unit_price = move.product_id.lst_price
+            item = {
+                'name': move.product_id.name,  # SKU is sent separately
+                'quantity': qty,
+                'unit_price': currency.round(unit_price),
+                'currency': currency.name,
+            }
+            if move.product_id.default_code:
+                item['sku'] = move.product_id.default_code
+            items.append(item)
         return items
 
-    def _get_redbox_items_json(self):
-        """Return items as JSON string for comparison"""
-        items = self._get_redbox_items()
-        return json.dumps(items, sort_keys=True)
-
-    def _send_update_to_redbox(self, items):
-        """
-        Send shipment update to Redbox API.
-        """
+    def _redbox_get_reference(self):
         self.ensure_one()
-        _logger.info("REDBOX _send_update_to_redbox called: %s", items)
-        payload = {
-            "items": items
-        }
-        try:
-            url = "https://api.redboxsa.com/v3/shipments/%s" % self.carrier_tracking_ref
-            headers = {
-                "Authorization": f"Bearer {self.carrier_id.redbox_api_key}"
-            }
-            response = requests.put(
-                url,
-                json=payload,
-                headers=headers,
-                timeout=50
-            )
-            _logger.info("=== REDBOX RESPONSE ===")
-            _logger.info("Status: %s", response.status_code)
-            _logger.info("Response: %s", response.text)
-            response.raise_for_status()
-            data = response.json()
-        except Exception as e:
-            _logger.error("Redbox API Connection Error for order %s: %s", self.name, e)
-            return
-
-        if data.get('success'):
-            _logger.info("REDBOX shipment updated successfully for order %s. Tracking: %s", self.name, self.carrier_tracking_ref)
-        else:
-            self.message_post(body=_('Redbox API Error: %s') % data.get('msg'))
-            _logger.error("Redbox Update  Shipment API Error for order %s: %s", self.name, data.get('msg'))
-    def action_cancel(self):
-        res = super().action_cancel()
-        for picking in self:
-            if picking.carrier_id and picking.carrier_id.delivery_type == 'redbox':
-                try:
-                    picking._cancel_redbox_shipment()
-                except Exception as e:
-                    _logger.exception("❌ Redbox cancel failed for %s", picking.name)
-                    picking.message_post(
-                        body=_("Redbox cancel failed: %s") % str(e)
-                    )
-
-        return res
-    def _cancel_redbox_shipment(self):
-        """
-        Cancel the shipment in Redbox.
-        """
-        self.ensure_one()
-        _logger.info("REDBOX _cancel_redbox_shipment called: %s", self.name)
-        payload = {}
-        try:
-            url = "https://api.redboxsa.com/v3/shipments/%s/cancel" % self.carrier_tracking_ref
-            headers = {
-                "Authorization": f"Bearer {self.carrier_id.redbox_api_key}"
-            }
-            response = requests.post(
-                url,
-                json=payload,
-                headers=headers,
-                timeout=50
-            )
-            _logger.info("=== REDBOX RESPONSE ===")
-            _logger.info("Status: %s", response.status_code)
-            _logger.info("Response: %s", response.text)
-            response.raise_for_status()
-            data = response.json()
-        except Exception as e:
-            _logger.error("Redbox API Connection Error for order %s: %s", self.name, e)
-            return
-
-        if data.get('success'):
-            _logger.info("REDBOX shipment cancelled successfully for order %s. Tracking: %s", self.name, self.carrier_tracking_ref)
-        else:
-            _logger.error("Redbox Update  Shipment API Error for order %s: %s", self.name, data.get('msg'))
-    def _handle_redbox_status(self, status, data):
-        """
-        Handle Redbox shipment status update and auto-validate picking if delivered.
-        """
-        self.ensure_one()
-
-        _logger.warning("[Redbox] Update status '%s' for picking '%s'", status, self.name)
-        self.sudo().write({'redbox_shipment_status': status})
-
-        status_clean = (status or '').strip().lower()
-
-        if status_clean == 'delivered' and self.state != 'done':
-            _logger.warning("[Redbox] Auto-validating picking '%s'", self.name)
-
-            # Reserve
-            self.sudo().action_assign()
-
-            # Compatible moves (Odoo 17 & 19)
-            moves = getattr(self, 'move_ids_without_package', False) or self.move_ids
-
-            for move in moves:
-                demand_qty = move.product_uom_qty
-
-                # Ensure move lines exist
-                if not move.move_line_ids:
-                    vals = {
-                        'move_id': move.id,
-                        'picking_id': self.id,
-                        'product_id': move.product_id.id,
-                        'product_uom_id': move.product_uom.id,
-                        'location_id': move.location_id.id,
-                        'location_dest_id': move.location_dest_id.id,
-                    }
-
-                    # Field difference between Odoo versions
-                    if 'quantity' in self.env['stock.move.line']._fields:
-                        vals['quantity'] = demand_qty
-                    else:
-                        vals['qty_done'] = demand_qty
-
-                    self.env['stock.move.line'].sudo().create(vals)
-
-                # Set done qty
-                for line in move.move_line_ids:
-                    if 'quantity' in line._fields:
-                        if not line.quantity:
-                            line.quantity = demand_qty
-                    elif 'qty_done' in line._fields:
-                        if not line.qty_done:
-                            line.qty_done = demand_qty
-
-            # Validate
-            res = self.sudo().button_validate()
-
-            # Handle wizard (multi-version safe)
-            if isinstance(res, dict):
-                model = res.get('res_model')
-                res_id = res.get('res_id')
-
-                if model and res_id:
-                    wizard = self.env[model].browse(res_id)
-                    _logger.warning("[Redbox] Processing wizard '%s'", model)
-                    if hasattr(wizard, 'process'):
-                        wizard.process()
-                    elif hasattr(wizard, 'action_confirm'):
-                        wizard.action_confirm()
-
-            _logger.warning("[Redbox] Picking '%s' state after validate: %s", self.name, self.state)
-
-        elif status_clean in ['in-transit']:
-            _logger.warning("[Redbox] Picking '%s' is in transit", self.name)
-
-        elif status_clean in ['not-delivered', 'cancelled']:
-            _logger.warning("[Redbox] Picking '%s' delivery failed or cancelled", self.name)
-    
-    def _update_redbox_shipment(self):
-        self.ensure_one()
-
         order = self.sale_id
+        base = order.name if order else self.name
+        other_shipped = order and order.picking_ids.filtered(
+            lambda p: p != self and p.redbox_reference and p.picking_type_code == 'outgoing')
+        if self.backorder_id or other_shipped:
+            base = '%s-%s' % (base, self.name)
+        # RedBox treats a known reference as the same shipment (idempotent), so a
+        # re-send after cancellation needs a new reference.
+        if self.redbox_send_count:
+            base = '%s-%s' % (base, self.redbox_send_count + 1)
+        return base
 
-        items = []
-        for line in order.order_line:
-            if line.is_delivery:
-                continue
+    def _redbox_get_order_paid_amount(self, order):
+        """Amount already paid on the order (online transactions or invoice payments)."""
+        tx_paid = sum(
+            tx.amount for tx in order.sudo().transaction_ids
+            if tx.state in ('done', 'authorized')
+        )
+        invoices = order.sudo().invoice_ids.filtered(
+            lambda m: m.state == 'posted' and m.move_type == 'out_invoice')
+        inv_paid = sum(inv.amount_total - inv.amount_residual for inv in invoices)
+        return max(tx_paid, inv_paid)
 
-            items.append({
-                "name": line.product_id.name,
-                "quantity": line.product_uom_qty,
-                "unit_price": line.price_unit,
-            })
-        
+    def _redbox_get_cod_amount(self):
+        self.ensure_one()
+        order = self.sale_id
+        if not order:
+            return 0.0
+        currency = order.currency_id
+        unpaid = order.amount_total - self._redbox_get_order_paid_amount(order)
+        # COD already assigned to other active RedBox shipments of the same order
+        other_cod = sum(order.picking_ids.filtered(
+            lambda p: p != self and p.redbox_shipment_id).mapped('redbox_cod_amount'))
+        unpaid = currency.round(max(unpaid - other_cod, 0.0))
+        if currency.is_zero(unpaid):
+            return 0.0
+        if not self.carrier_id.redbox_allow_cod:
+            raise UserError(_(
+                "The carrier %(carrier)s does not allow Cash on Delivery, but order %(order)s "
+                "has an unpaid balance of %(amount)s %(currency)s. Register the payment first "
+                "or enable 'Allow Cash on Delivery' on the carrier.",
+                carrier=self.carrier_id.name, order=order.name,
+                amount=unpaid, currency=currency.name))
+        if unpaid > REDBOX_MAX_COD:
+            raise UserError(_(
+                "RedBox does not accept a COD amount above %(max)s (order %(order)s: %(amount)s).",
+                max=REDBOX_MAX_COD, order=order.name, amount=unpaid))
+        return unpaid
+
+    def _redbox_prepare_shipment_payload(self):
+        self.ensure_one()
+        carrier = self.carrier_id
+        order = self.sale_id
+        partner = self.partner_id or (order and order.partner_shipping_id)
+        if not partner:
+            raise UserError(_("Picking %s has no delivery address.", self.name))
+        phone = partner.phone or getattr(partner, 'mobile', False)
+        if not phone:
+            raise UserError(_("RedBox requires a phone number for %s.", partner.display_name))
+        city = partner.city or partner.state_id.name or ''
+        if carrier.redbox_home_delivery and not city:
+            raise UserError(_("RedBox Home Delivery requires a city for %s.", partner.display_name))
+        currency = order.currency_id if order else self.company_id.currency_id
+
         payload = {
-            "items": items,
-            "cod_amount": order.amount_total - order.amount_paid,
-            "cod_currency": order.currency_id.name,
+            'reference': self._redbox_get_reference(),
+            'customer_name': partner.name or partner.display_name,
+            'customer_phone': phone,
+            'customer_email': partner.email or '',
+            'customer_address': ', '.join(filter(None, [partner.street, partner.street2])) or city,
+            'customer_city': city,
+            'customer_country': partner.country_id.name or '',
+            'cod_amount': self._redbox_get_cod_amount(),
+            'cod_currency': currency.name,
+            'items': self._redbox_get_items(),
         }
+        if carrier.redbox_home_delivery:
+            payload['delivery_method'] = 'home_delivery'
+        weight = self.shipping_weight or self.weight
+        if weight:
+            payload['weight_value'] = weight
+            payload['weight_unit'] = self.env['product.template']._get_weight_uom_name_from_ir_config_parameter()
+        if order:
+            delivery_lines = order.order_line.filtered('is_delivery')
+            if delivery_lines:
+                payload['shipping_price'] = currency.round(sum(delivery_lines.mapped('price_total')))
+                payload['shipping_price_currency'] = currency.name
+        return payload
 
-        _logger.warning("📦 Redbox payload update: %s", payload)
-
-        _logger.info("REDBOX _send_update_to_redbox called: %s", items)
-        
-        try:
-            url = "https://api.redboxsa.com/v3/shipments/%s" % self.carrier_tracking_ref
-            headers = {
-                "Authorization": f"Bearer {self.carrier_id.redbox_api_key}"
-            }
-            response = requests.put(
-                url,
-                json=payload,
-                headers=headers,
-                timeout=50
-            )
-            _logger.info("=== REDBOX RESPONSE ===")
-            _logger.info("Status: %s", response.status_code)
-            _logger.info("Response: %s", response.text)
-            response.raise_for_status()
-            data = response.json()
-        except Exception as e:
-            _logger.error("Redbox API Connection Error for order %s: %s", self.name, e)
+    def _redbox_attach_label(self, url, tracking):
+        if not url:
             return
+        try:
+            response = requests.get(url, timeout=30)
+            response.raise_for_status()
+        except Exception as e:  # label download must never block the shipment
+            _logger.warning("RedBox label download failed for %s: %s", self.name, e)
+            return
+        self.message_post(
+            body=_("RedBox shipping label (tracking %s).", tracking),
+            attachments=[('RedBox-%s.pdf' % (tracking or self.name), response.content)],
+        )
 
-        if data.get('success'):
-            _logger.info("REDBOX shipment updated successfully for order %s. Tracking: %s", self.name, self.carrier_tracking_ref)
-        else:
-            self.message_post(body=_('Redbox API Error: %s') % data.get('msg'))
-            _logger.error("Redbox Update  Shipment API Error for order %s: %s", self.name, data.get('msg'))
-            
+    # -------------------------------------------------------------------------
+    # Returns
+    # -------------------------------------------------------------------------
+
+    def _redbox_ensure_shipment_id(self):
+        """Return the RedBox shipment_id, fetching it for shipments created by older
+        versions of the module that only stored the tracking number."""
+        self.ensure_one()
+        if self.redbox_shipment_id:
+            return self.redbox_shipment_id
+        if not self.carrier_tracking_ref:
+            raise UserError(_("Delivery %s has no RedBox shipment.", self.name))
+        data = self.carrier_id._redbox_request(
+            'GET', '/v3/shipments/%s' % quote(self.carrier_tracking_ref, safe=''))
+        shipment_id = (data.get('shipment') or {}).get('id')
+        if not shipment_id:
+            raise UserError(_("RedBox shipment %s not found.", self.carrier_tracking_ref))
+        self.write({'redbox_shipment_id': shipment_id})
+        return shipment_id
+
+    def _redbox_create_return(self):
+        self.ensure_one()
+        if self.redbox_shipment_id:
+            raise UserError(_("A RedBox return already exists for %s.", self.name))
+        origin = self.redbox_origin_picking_id
+        if not origin:
+            raise UserError(_("%s is not a return of a RedBox delivery.", self.name))
+        carrier = origin.carrier_id
+        payload = {
+            'original_shipment_id': origin._redbox_ensure_shipment_id(),
+            'reference': self.name,
+        }
+        items = self._redbox_get_items(use_demand=True)
+        if items:
+            payload['items'] = items
+        data = carrier._redbox_request('POST', '/v3/shipments/returns', payload, timeout=60)
+        vals = {
+            'redbox_shipment_id': data.get('shipment_id'),
+            'carrier_tracking_ref': data.get('tracking_number'),
+            'redbox_label_url': data.get('shipping_label_url'),
+            'redbox_return_code': data.get('return_code'),
+            'redbox_reference': self.name,
+            'redbox_shipment_status': 'R-Waiting',
+            'redbox_status_code': 0,
+            'redbox_status_date': False,
+        }
+        if not self.carrier_id:
+            vals['carrier_id'] = carrier.id
+        self.write(vals)
+        body = _("RedBox return created. Tracking: %s", data.get('tracking_number'))
+        if data.get('return_code'):
+            body = _("%(body)s. Return code for the customer: %(code)s",
+                     body=body, code=data.get('return_code'))
+        self.message_post(body=body)
+        self._redbox_attach_label(data.get('shipping_label_url'), data.get('tracking_number'))
+        return data
+
+    def _redbox_validate_return(self):
+        self.ensure_one()
+        if self.state == 'draft':
+            self.action_confirm()
+        if self.state in ('confirmed', 'waiting'):
+            self.action_assign()
+        for move in self.move_ids.filtered(lambda m: m.state not in ('done', 'cancel')):
+            if move.quantity != move.product_uom_qty:
+                move.quantity = move.product_uom_qty
+            if 'picked' in move._fields:
+                move.picked = True
+        res = self.with_context(
+            skip_backorder=True, cancel_backorder=True,
+            skip_sms=True, skip_immediate=True,
+            picking_ids_not_to_backorder=self.ids,
+        ).button_validate()
+        if self.state != 'done':
+            raise UserError(_("Manual validation required (%s).",
+                              isinstance(res, dict) and res.get('res_model') or res))
+
+    # -------------------------------------------------------------------------
+    # Webhook status
+    # -------------------------------------------------------------------------
+
+    @api.model
+    def _redbox_parse_date(self, value):
+        if not value:
+            return False
+        try:
+            dt = date_parser.isoparse(value)
+        except (ValueError, TypeError):
+            return False
+        if dt.tzinfo:
+            dt = dt.astimezone(tz.UTC).replace(tzinfo=None)
+        return dt.replace(microsecond=0)
+
+    def _redbox_apply_status(self, data):
+        """Apply a RedBox `shipment.status.update` webhook payload. Returns a short result."""
+        self.ensure_one()
+        status = (data.get('status_name') or '').strip()
+        try:
+            code = int(data.get('status_code') or 0)
+        except (TypeError, ValueError):
+            code = 0
+        event_date = self._redbox_parse_date(data.get('date'))
+
+        if event_date and self.redbox_status_date:
+            if event_date < self.redbox_status_date:
+                return 'stale'
+            if event_date == self.redbox_status_date and code == self.redbox_status_code \
+                    and status == self.redbox_shipment_status:
+                return 'duplicate'
+
+        changed = status != self.redbox_shipment_status or code != self.redbox_status_code
+        vals = {
+            'redbox_shipment_status': status,
+            'redbox_status_code': code,
+            'redbox_status_date': event_date or fields.Datetime.now(),
+        }
+        if not self.redbox_shipment_id and data.get('shipment_id'):
+            vals['redbox_shipment_id'] = data['shipment_id']
+        self.write(vals)
+        if not changed:
+            return 'unchanged'
+
+        label = data.get('status_label') or ''
+        self.message_post(body=_("RedBox status: %(status)s%(label)s",
+                                 status=status, label=(' - %s' % label) if label else ''))
+
+        status_l = status.lower()
+        if status_l == REDBOX_STATUS_RETURNED and self.picking_type_code == 'incoming' \
+                and self.state not in ('done', 'cancel') and self.carrier_id.redbox_auto_validate_return:
+            try:
+                with self.env.cr.savepoint():
+                    self._redbox_validate_return()
+                self.message_post(body=_("Return validated automatically after RedBox 'Returned' status."))
+            except Exception as e:
+                _logger.warning("RedBox auto-validation failed for %s: %s", self.name, e)
+                self.message_post(body=_("Automatic validation of the return failed: %s", e))
+                self._redbox_schedule_alert(status)
+        elif status_l in REDBOX_ALERT_STATUSES:
+            self._redbox_schedule_alert(status)
+        return 'ok'
+
+    def _redbox_schedule_alert(self, status):
+        self.ensure_one()
+        user = self.user_id or self.sale_id.user_id or self.env.ref('base.user_admin', raise_if_not_found=False)
+        act_type = self.env.ref('mail.mail_activity_data_warning', raise_if_not_found=False) \
+            or self.env.ref('mail.mail_activity_data_todo', raise_if_not_found=False)
+        if not act_type or not user:
+            return
+        self.activity_schedule(
+            activity_type_id=act_type.id,
+            user_id=user.id,
+            summary=_("RedBox shipment %s", status),
+            note=_("RedBox reported status '%(status)s' for tracking %(tracking)s. "
+                   "Please follow up (e.g. create a return to restock the goods).",
+                   status=status, tracking=self.carrier_tracking_ref or ''),
+        )

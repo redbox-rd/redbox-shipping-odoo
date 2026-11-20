@@ -4,20 +4,33 @@
         <field name="model">delivery.carrier</field>
         <field name="inherit_id" ref="delivery.view_delivery_carrier_form"/>
         <field name="arch" type="xml">
-
-            <xpath expr="//group" position="inside">
-
-                <group string="RedBox Configuration" invisible="delivery_type != 'redbox'">
-                    <field name="redbox_api_key" password="True" required="delivery_type == 'redbox'"/>
-                    <field name="redbox_fixed_price"/>
-                    <field name="redbox_home_delivery"/>
-                    <field name="blocked_payment_provider_ids" 
-                       widget="many2many_tags" 
-                       invisible="delivery_type != 'redbox'"/>
-                </group>
-
+            <xpath expr="//notebook" position="inside">
+                <page string="RedBox" name="redbox_config" invisible="delivery_type != 'redbox'">
+                    <group>
+                        <group string="Account">
+                            <field name="redbox_api_key" password="True" required="delivery_type == 'redbox'"/>
+                            <field name="redbox_home_delivery"/>
+                            <field name="redbox_fixed_price"/>
+                        </group>
+                        <group string="Payments">
+                            <field name="redbox_allow_cod"/>
+                            <field name="blocked_payment_provider_ids" widget="many2many_tags"/>
+                        </group>
+                        <group string="Status Webhook">
+                            <field name="redbox_webhook_created" readonly="1"/>
+                            <button name="action_redbox_register_webhook" type="object"
+                                    string="Register Webhook" class="btn-secondary" colspan="2"/>
+                        </group>
+                        <group string="Returns">
+                            <field name="redbox_auto_validate_return"/>
+                        </group>
+                    </group>
+                    <div class="text-muted">
+                        Use the Production / Test Environment toggle of this carrier to switch
+                        between the RedBox production and sandbox APIs.
+                    </div>
+                </page>
             </xpath>
-
         </field>
     </record>
 </odoo>
